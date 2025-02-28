@@ -24,6 +24,7 @@ import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
+import io.grpc.internal.BooleanLatch;
 import io.grpc.netty.GrpcHttp2ConnectionHandler;
 import io.grpc.netty.InternalNettyChannelBuilder;
 import io.grpc.netty.InternalNettyChannelBuilder.ProtocolNegotiatorFactory;
@@ -41,7 +42,6 @@ import io.netty.handler.codec.http2.Http2Stream;
 import io.netty.util.AsciiString;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -190,10 +190,9 @@ public class NettyFlowControlTest {
   private static class TestStreamObserver implements StreamObserver<StreamingOutputCallResponse> {
 
     final AtomicReference<GrpcHttp2ConnectionHandler> grpcHandlerRef;
-    final CountDownLatch latch = new CountDownLatch(1);
+    final BooleanLatch completed = new BooleanLatch();
     final long expectedWindow;
-    int lastWindow;
-    boolean wasCompleted;
+    volatile int lastWindow;
 
     public TestStreamObserver(
         AtomicReference<GrpcHttp2ConnectionHandler> grpcHandlerRef, long window) {
@@ -208,13 +207,12 @@ public class NettyFlowControlTest {
       int curWindow = grpcHandler.decoder().flowController().initialWindowSize(connectionStream);
       synchronized (this) {
         if (curWindow >= expectedWindow) {
-          if (wasCompleted) {
+          if (completed.isSignaled()) {
             return;
           }
-          wasCompleted = true;
           lastWindow = curWindow;
-          onCompleted();
-        } else if (!wasCompleted) {
+          completed.signal();
+        } else if (!completed.isSignaled()) {
           lastWindow = curWindow;
         }
       }
@@ -222,17 +220,17 @@ public class NettyFlowControlTest {
 
     @Override
     public void onError(Throwable t) {
-      latch.countDown();
+      completed.signal();
       throw new RuntimeException(t);
     }
 
     @Override
     public void onCompleted() {
-      latch.countDown();
+      completed.signal();
     }
 
     public int waitFor(long duration, TimeUnit unit) throws InterruptedException {
-      latch.await(duration, unit);
+      assertTrue("should be completed", completed.await(duration, unit));
       return lastWindow;
     }
   }
